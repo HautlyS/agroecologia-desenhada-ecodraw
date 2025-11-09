@@ -1,0 +1,62 @@
+name: Build Botanical Library Database
+
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'src/components/Library/data.js'
+      - 'src/components/Library/convert_to_sqlite.py'
+      - '.github/workflows/build-botanical-db.yml'
+  pull_request:
+    branches: [ main, master ]
+    paths:
+      - 'src/components/Library/data.js'
+  workflow_dispatch:
+
+jobs:
+  build-database:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        
+    - name: Build SQLite database
+      run: |
+        python src/components/Library/convert_to_sqlite.py
+        
+    - name: Verify database
+      run: |
+        ls -lh src/components/Library/botanical_library.db
+        sqlite3 src/components/Library/botanical_library.db "SELECT COUNT(*) as plant_count FROM plants;"
+        
+    - name: Upload database artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: botanical-library-db
+        path: src/components/Library/botanical_library.db
+        retention-days: 90
+        
+    - name: Commit database to repository
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      run: |
+        git config --local user.email "github-actions[bot]@users.noreply.github.com"
+        git config --local user.name "github-actions[bot]"
+        git add src/components/Library/botanical_library.db
+        git diff --staged --quiet || git commit -m "chore: update botanical library database [skip ci]"
+        
+    - name: Push changes
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      uses: ad-m/github-push-action@master
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        branch: ${{ github.ref }}

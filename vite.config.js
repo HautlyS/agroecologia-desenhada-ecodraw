@@ -2,10 +2,27 @@ import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { VitePWA } from 'vite-plugin-pwa'
 import { fileURLToPath, URL } from 'node:url'
+import { copyFileSync, existsSync } from 'node:fs'
+import { resolve } from 'node:path'
 
 export default defineConfig({
   plugins: [
     vue(),
+    // Copy SQLite database to public folder
+    {
+      name: 'copy-sqlite-db',
+      buildStart() {
+        const dbSource = resolve(__dirname, 'src/components/Library/botanical_library.db')
+        const dbDest = resolve(__dirname, 'public/botanical_library.db')
+        
+        if (existsSync(dbSource)) {
+          copyFileSync(dbSource, dbDest)
+          console.log('✓ Copied botanical_library.db to public folder')
+        } else {
+          console.warn('⚠ botanical_library.db not found, run: python src/components/Library/convert_to_sqlite.py')
+        }
+      }
+    },
     VitePWA({
       registerType: 'autoUpdate',
       includeAssets: ['favicon.ico', 'robots.txt', 'apple-touch-icon.png'],
@@ -37,7 +54,7 @@ export default defineConfig({
         ]
       },
       workbox: {
-        globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
+        globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2,db}'],
         runtimeCaching: [
           {
             urlPattern: /^https:\/\/fonts\.googleapis\.com\/.*/i,

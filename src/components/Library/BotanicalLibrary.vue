@@ -1,6 +1,6 @@
 <script setup>
-import { ref, computed, reactive, inject } from 'vue'
-import { data } from 'data.js';
+import { ref, computed, reactive, inject, onMounted, onUnmounted, watch } from 'vue'
+import { useSQLite } from '@/composables/useSQLite'
 
 // ============================================================================
 // COMPONENT STATE
@@ -11,6 +11,18 @@ const emit = defineEmits(['close', 'select', 'favorite'])
 // Get accent color from app theme
 const accentColor = inject('primaryColor', ref('#FF4015'))
 
+// SQLite composable (browser-based, no backend needed!)
+const { 
+  initDatabase, 
+  getPlants, 
+  searchPlants, 
+  getStats,
+  isLoading: dbLoading, 
+  isInitialized,
+  error: dbError,
+  closeDatabase
+} = useSQLite()
+
 // UI State
 const selectedCategory = ref('ALL')
 const searchQuery = ref('')
@@ -19,6 +31,11 @@ const sortBy = ref('name') // 'name', 'region', 'origin', 'uses', 'nutrition'
 const favorites = reactive(new Set())
 const expandedItems = reactive(new Set())
 const isLoading = ref(false)
+const loadError = ref(null)
+
+// Data state
+const allItems = ref([])
+const dbStats = ref(null)
 
 // Filter options
 const activeFilters = reactive({
@@ -49,53 +66,124 @@ const categories = [
   'TREES',
   'FLOWERS',
   'CROPS',
+  'SPICES',
+  'PANCS',
   'INVASIVE_SPECIES'
 ]
 
-const allItems = data
+// ============================================================================
+// DATA LOADING
+// ============================================================================
+
+// Initialize database and load data
+onMounted(async () => {
+  try {
+    // Initialize the database (loads from /botanical_library.db)
+    await initDatabase('/botanical_library.db')
+    
+    // Load initial data
+    await loadPlants()
+    await loadStats()
+  } catch (err) {
+    loadError.value = 'Failed to initialize database: ' + err.message
+    console.error('Database initialization failed:', err)
+  }
+})
+
+// Cleanup on unmount
+onUnmounted(() => {
+  closeDatabase()
+})
+
+// Watch for filter changes and reload data
+watch([selectedCategory, () => activeFilters.origin, () => activeFilters.hasWarning, 
+       () => activeFilters.harvestMonth, () => activeFilters.minNutritionScore], 
+  () => {
+    currentPage.value = 1
+    loadPlants()
+  }
+)
+
+// Load plants from SQLite database
+const loadPlants = () => {
+  if (!isInitialized.value) {
+    return
+  }
+
+  isLoading.value = true
+  loadError.value = null
+  
+  try {
+    const filters = {
+      type: selectedCategory.value !== 'ALL' ? selectedCategory.value : undefined,
+      origin: activeFilters.origin !== 'ALL' ? activeFilters.origin : undefined,
+      hasWarning: activeFilters.hasWarning,
+      harvestMonth: activeFilters.harvestMonth || undefined,
+      minNutrition: activeFilters.minNutritionScore > 0 ? activeFilters.minNutritionScore : undefined
+    }
+    
+    allItems.value = getPlants(filters)
+  } catch (err) {
+    loadError.value = err.message
+    console.error('Failed to load plants:', err)
+    allItems.value = []
+  } finally {
+    isLoading.value = false
+  }
+}
+
+// Load statistics
+const loadStats = () => {
+  if (!isInitialized.value) {
+    return
+  }
+
+  try {
+    dbStats.value = getStats()
+  } catch (err) {
+    console.error('Failed to load stats:', err)
+  }
+}
+
+// Search plants
+const performSearch = (query) => {
+  if (!isInitialized.value) {
+    return
+  }
+
+  if (!query || query.trim().length === 0) {
+    loadPlants()
+    return
+  }
+  
+  isLoading.value = true
+  loadError.value = null
+  
+  try {
+    allItems.value = searchPlants(query)
+  } catch (err) {
+    loadError.value = err.message
+    console.error('Search failed:', err)
+    allItems.value = []
+  } finally {
+    isLoading.value = false
+  }
+}
 
 // ============================================================================
 // COMPUTED PROPERTIES & FILTERING LOGIC
 // ============================================================================
 
 const filteredAndSortedItems = computed(() => {
-  let items = allItems
+  let items = [...allItems.value]
 
-  // Apply category filter
-  if (selectedCategory.value !== 'ALL') {
-    items = items.filter(item => item.type === selectedCategory.value)
-  }
-
-  // Apply origin filter
-  if (activeFilters.origin !== 'ALL') {
-    items = items.filter(item => item.origin === activeFilters.origin)
-  }
-
-  // Apply warning filter
-  if (activeFilters.hasWarning) {
-    items = items.filter(item => item.warning)
-  }
-
-  // Apply harvest month filter
-  if (activeFilters.harvestMonth) {
-    items = items.filter(item => item.harvestMonths?.includes(activeFilters.harvestMonth))
-  }
-
-  // Apply nutrition score filter
-  if (activeFilters.minNutritionScore > 0) {
-    items = items.filter(item => {
-      const score = item.nutritionScore || item.efficacyScore || 0
-      return score >= activeFilters.minNutritionScore
-    })
-  }
-
-  // Apply search query (debounced)
-  if (debouncedSearch.value) {
+  // Apply client-side search filter if debounced search is active
+  if (debouncedSearch.value && debouncedSearch.value.length > 0) {
     const query = debouncedSearch.value.toLowerCase()
     items = items.filter(item =>
-      item.name.toLowerCase().includes(query) ||
-      item.scientificName.toLowerCase().includes(query) ||
-      item.region.toLowerCase().includes(query) ||
+      item.name?.toLowerCase().includes(query) ||
+      item.scientificName?.toLowerCase().includes(query) ||
+      item.region?.toLowerCase().includes(query) ||
       item.description?.toLowerCase().includes(query) ||
       item.uses?.some(u => u.toLowerCase().includes(query)) ||
       item.keywords?.some(k => k.toLowerCase().includes(query))
@@ -106,11 +194,11 @@ const filteredAndSortedItems = computed(() => {
   items.sort((a, b) => {
     switch (sortBy.value) {
       case 'name':
-        return a.name.localeCompare(b.name, 'pt-BR')
+        return (a.name || '').localeCompare(b.name || '', 'pt-BR')
       case 'region':
-        return a.region.localeCompare(b.region, 'pt-BR')
+        return (a.region || '').localeCompare(b.region || '', 'pt-BR')
       case 'origin':
-        return a.origin.localeCompare(b.origin)
+        return (a.origin || '').localeCompare(b.origin || '')
       case 'commercial':
         const commercialOrder = { 'HIGHEST': 0, 'HIGH': 1, 'MEDIUM': 2, 'LOW': 3, 'HISTORIC': 4, 'NEGATIVE': 5 }
         return (commercialOrder[a.commercialValue] || 5) - (commercialOrder[b.commercialValue] || 5)
@@ -136,23 +224,47 @@ const totalPages = computed(() => {
   return Math.ceil(filteredAndSortedItems.value.length / itemsPerPage.value)
 })
 
-const stats = computed(() => ({
-  total: filteredAndSortedItems.value.length,
-  native: filteredAndSortedItems.value.filter(i => i.origin === 'NATIVE').length,
-  introduced: filteredAndSortedItems.value.filter(i => i.origin === 'INTRODUCED').length,
-  withWarnings: filteredAndSortedItems.value.filter(i => i.warning).length,
-  favorites: favorites.size
-}))
+const stats = computed(() => {
+  if (dbStats.value) {
+    return {
+      total: filteredAndSortedItems.value.length,
+      native: dbStats.value.byOrigin?.NATIVE || 0,
+      introduced: dbStats.value.byOrigin?.INTRODUCED || 0,
+      withWarnings: dbStats.value.withWarnings || 0,
+      favorites: favorites.size
+    }
+  }
+  
+  return {
+    total: filteredAndSortedItems.value.length,
+    native: filteredAndSortedItems.value.filter(i => i.origin === 'NATIVE').length,
+    introduced: filteredAndSortedItems.value.filter(i => i.origin === 'INTRODUCED').length,
+    withWarnings: filteredAndSortedItems.value.filter(i => i.warning).length,
+    favorites: favorites.size
+  }
+})
 
 const categoryCount = computed(() => {
   const counts = {}
-  categories.forEach(cat => {
-    if (cat === 'ALL') {
-      counts[cat] = allItems.length
-    } else {
-      counts[cat] = allItems.filter(item => item.type === cat).length
-    }
-  })
+  
+  if (dbStats.value?.byType) {
+    categories.forEach(cat => {
+      if (cat === 'ALL') {
+        counts[cat] = dbStats.value.total || 0
+      } else {
+        counts[cat] = dbStats.value.byType[cat] || 0
+      }
+    })
+  } else {
+    categories.forEach(cat => {
+      if (cat === 'ALL') {
+        counts[cat] = allItems.value.length
+      } else {
+        counts[cat] = allItems.value.filter(item => item.type === cat).length
+      }
+    })
+  }
+  
   return counts
 })
 
@@ -196,6 +308,7 @@ const clearFilters = () => {
   searchQuery.value = ''
   debouncedSearch.value = ''
   currentPage.value = 1
+  loadPlants()
 }
 
 const getItemIcon = (type) => {
@@ -245,6 +358,13 @@ const handleSearchInput = (event) => {
   searchTimeout = setTimeout(() => {
     debouncedSearch.value = searchQuery.value
     currentPage.value = 1
+    
+    // Use full-text search for better performance
+    if (searchQuery.value.length > 2) {
+      performSearch(searchQuery.value)
+    } else if (searchQuery.value.length === 0) {
+      loadPlants()
+    }
   }, 300)
 }
 
@@ -315,6 +435,12 @@ const handleKeydown = (event) => {
           <div class="stat" v-if="stats.favorites > 0">
             <span class="stat-label">❤️ Favoritos:</span>
             <span class="stat-value favorite">{{ stats.favorites }}</span>
+          </div>
+          <div class="stat api-status">
+            <span class="stat-label">DB:</span>
+            <span :class="['stat-value', 'status-indicator', { 'connected': isInitialized, 'disconnected': !isInitialized }]">
+              {{ isInitialized ? '🟢 Carregado' : (dbLoading ? '🟡 Carregando...' : '🔴 Erro') }}
+            </span>
           </div>
         </div>
       </div>
@@ -417,13 +543,27 @@ const handleKeydown = (event) => {
 
         <!-- ITEMS GRID -->
         <div class="items-container">
+          <!-- Loading State -->
+          <div v-if="isLoading || dbLoading" class="loading-state">
+            <div class="spinner"></div>
+            <p>{{ dbLoading ? 'Inicializando banco de dados...' : 'Carregando plantas...' }}</p>
+          </div>
+
+          <!-- Error State -->
+          <div v-else-if="loadError || dbError" class="error-state">
+            <p>⚠️ Erro: {{ loadError || dbError }}</p>
+            <button @click="loadPlants" class="retry-btn">Tentar Novamente</button>
+          </div>
+
+          <!-- No Results -->
           <div
-            v-if="filteredAndSortedItems.length === 0"
+            v-else-if="filteredAndSortedItems.length === 0"
             class="no-results"
           >
             <p>❌ Nenhuma planta encontrada com esses filtros.</p>
           </div>
 
+          <!-- Items Grid -->
           <div v-else class="items-grid">
             <transition-group name="card-fade">
               <div
@@ -943,6 +1083,29 @@ const handleKeydown = (event) => {
   border-color: rgba(255, 68, 68, 0.3);
 }
 
+.api-status .status-indicator {
+  font-size: 12px;
+  padding: 2px 8px;
+}
+
+.api-status .status-indicator.connected {
+  background: rgba(76, 175, 80, 0.15);
+  color: #4caf50;
+  border-color: rgba(76, 175, 80, 0.3);
+}
+
+.api-status .status-indicator.disconnected {
+  background: rgba(244, 67, 54, 0.15);
+  color: #f44336;
+  border-color: rgba(244, 67, 54, 0.3);
+  animation: pulse-error 2s infinite;
+}
+
+@keyframes pulse-error {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
 /* ============================================================================
    TRANSITIONS & ANIMATIONS
    ============================================================================ */
@@ -1006,14 +1169,57 @@ const handleKeydown = (event) => {
   background: #000000;
 }
 
+.loading-state,
+.error-state,
 .no-results {
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
   min-height: 300px;
-  color: rgba(255, 255, 255, 0.4);
+  gap: 16px;
+  color: rgba(255, 255, 255, 0.7);
   font-size: 16px;
   text-align: center;
+}
+
+.loading-state .spinner {
+  width: 48px;
+  height: 48px;
+  border: 4px solid rgba(255, 64, 21, 0.2);
+  border-top-color: v-bind(accentColor);
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.error-state {
+  color: #ff4444;
+}
+
+.retry-btn {
+  padding: 10px 20px;
+  background: rgba(255, 64, 21, 0.2);
+  color: v-bind(accentColor);
+  border: 1px solid rgba(255, 64, 21, 0.3);
+  border-radius: 8px;
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 14px;
+  transition: all 0.2s;
+}
+
+.retry-btn:hover {
+  background: rgba(255, 64, 21, 0.3);
+  border-color: v-bind(accentColor);
+  transform: translateY(-1px);
+}
+
+.no-results {
+  color: rgba(255, 255, 255, 0.4);
 }
 
 .items-grid {
